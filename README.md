@@ -1,6 +1,8 @@
 # G-Code Feature Extractor
 
-A local MVP that parses FFF/FDM `.gcode` files (PrusaSlicer 2.7.x) and extracts **declared settings**, **hidden/derived global features**, and **per-layer metrics** — all visualised in a browser UI.
+A local web app that parses FFF/FDM `.gcode` files (PrusaSlicer) and extracts a **15-feature ML training vector** — 5 slicer input parameters + 10 hidden G-code-derived features — visualised in a browser UI.
+
+Built to generate training data for a neural network predicting tensile strength of PETG specimens (DIN EN ISO 3167).
 
 ---
 
@@ -12,19 +14,13 @@ A local MVP that parses FFF/FDM `.gcode` files (PrusaSlicer 2.7.x) and extracts 
 | Node.js    | 20 LTS        | [nodejs.org](https://nodejs.org) |
 | npm        | 10+           | bundled with Node |
 
-> Windows users: use **PowerShell** or **Git Bash**. All commands below use forward slashes.
+> Windows users: use **PowerShell** or **Git Bash**.
 
 ---
 
-## Quick Start (< 10 minutes)
+## Quick Start
 
-### 1 — Clone / open the project
-
-```bash
-cd C:/Users/<you>/gcode-feature-extractor
-```
-
-### 2 — Backend setup
+### 1 — Backend
 
 ```bash
 cd backend
@@ -37,18 +33,12 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8001
 ```
 
-Start the API server:
+API: `http://localhost:8001` · Docs: `http://localhost:8001/docs`
 
-```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-The API is now at `http://localhost:8000`.
-Interactive docs: `http://localhost:8000/docs`
-
-### 3 — Frontend setup
+### 2 — Frontend
 
 Open a **second terminal**:
 
@@ -58,40 +48,93 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in your browser.
+Open `http://localhost:5173`.
+
+> Shortcut on Windows: double-click `start_project.bat` to launch both servers at once.
 
 ---
 
 ## Usage
 
+### Single-file mode
+
 1. Drag & drop a `.gcode` file (or click to browse).
 2. Click **Extract Features**.
 3. Explore the four tabs:
-   - **Summary** — KPI cards, E/mm by section type, raw JSON
-   - **Layer Features** — 6 Plotly charts + scrollable table
+   - **Summary** — Training Vector (5 slicer params + 10 G-code KPIs), raw JSON
+   - **Layer Features** — Plotly charts + scrollable per-layer table
    - **Events & Settings** — temperatures, linear advance, dynamics, declared settings
    - **Downloads** — four artefact files
 
-### Download artefacts
+### Batch mode
 
-| File | Contents |
-|------|----------|
-| `features_global.json` | All global & derived features |
-| `features_layers.csv`  | Per-layer feature table (all layers) |
-| `feature_manifest.md`  | Feature definitions, units, dependencies |
-| `segments.csv`         | Raw segment data (every G0/G1 move) |
+1. Switch to **Batch** in the top navigation.
+2. Select multiple `.gcode` files.
+3. Click **Alle extrahieren** — a progress bar shows per-file status.
+4. The preview table shows layers, nozzle temp, thermal bonding, and feature count per file.
+5. Click any filename to open its full single-file analysis in an overlay.
+6. Download `training_data.csv` — one row per file, ready for NN training (add a `tensile_strength_mpa` column with measured values).
 
 ---
 
-## Running tests
+## Training Vector
+
+The 15-feature vector is the core output for ML. Missing slicer parameters are `null` (empty cell in CSV = NaN in the ML pipeline) rather than `0.0`.
+
+### 5 Slicer Input Parameters
+
+| Key | Header field | Unit |
+|-----|-------------|------|
+| `sp__layer_height` | `layer_height` | mm |
+| `sp__nozzle_temp` | `temperature` | °C |
+| `sp__fill_density` | `fill_density` | fraction 0–1 |
+| `sp__print_speed` | `print_speed` / `infill_speed` | mm/s |
+| `sp__perimeters` | `perimeters` | count |
+
+### 10 G-Code-Derived Features
+
+| Key | Description |
+|-----|-------------|
+| `thermal_bonding_proxy` | T_nozzle × exp(−mean_layer_time / 30 s) |
+| `e_per_mm_cv__mean` | Flow consistency (CV of E/mm per layer) |
+| `interruption_density` | Retracts per metre of extrusion |
+| `short_extrusion_ratio` | Fraction of segments < 1 mm |
+| `estimated_load_alignment_score` | Infill fraction within ±22.5° of X-axis |
+| `alternating_infill_score` | Layer pairs with ~90° angle flip |
+| `layer_extrusion_uniformity` | 1 − CV(extrusion per layer) |
+| `perimeter_to_infill_ratio` | Wall vs. core path length |
+| `section_type_count__mean` | Mean distinct ;TYPE sections per layer |
+| `retract_wipe_correlation` | Fraction of retracts inside wipe blocks |
+
+---
+
+## Download Artefacts (single-file mode)
+
+| File | Contents |
+|------|----------|
+| `training_data.csv` | 15-feature training vector (1 row) |
+| `features_global.json` | All global & derived features |
+| `features_layers.csv` | Per-layer feature table |
+| `feature_manifest.md` | Feature definitions, units, formulas |
+
+---
+
+## Running Tests
 
 ```bash
-cd backend
-pip install pytest   # only needed once
-pytest ../tests -v
+# from the project root
+backend/.venv/Scripts/python -m pytest tests/ -v   # Windows
+# or
+backend/.venv/bin/python -m pytest tests/ -v       # Linux / macOS
 ```
 
-Expected output: **all tests pass** against `sample_data/mini_test.gcode`.
+**142 tests** across three files:
+
+| File | What it tests |
+|------|--------------|
+| `test_parser.py` | Parser logic: layers, retracts, wipe blocks, dynamics, headers — calibrated to synthetic `mini_test.gcode` |
+| `test_new_features.py` | Feature groups: thermal history, bonding quality, orientation, energy flow, specimen aggregation |
+| `test_real_gcode.py` | Integration tests on `sample_data/Nr. 1.gcode` (real PETG tensile specimen) — verifies all 5 slicer params with known ground-truth values |
 
 ---
 
@@ -101,32 +144,35 @@ Expected output: **all tests pass** against `sample_data/mini_test.gcode`.
 gcode-feature-extractor/
 ├── backend/
 │   ├── app/
-│   │   ├── __init__.py
-│   │   ├── parser.py      # State-machine G-code parser
-│   │   ├── features.py    # Feature engineering (global + layer + manifest)
-│   │   ├── models.py      # Pydantic API models
-│   │   └── main.py        # FastAPI endpoints
+│   │   ├── parser.py        # State-machine G-code parser
+│   │   ├── features.py      # Feature engineering + training vector builder
+│   │   ├── models.py        # Pydantic API models
+│   │   └── main.py          # FastAPI endpoints (port 8001)
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx                          # Main layout + tabs
-│   │   ├── components/
-│   │   │   ├── UploadArea.tsx               # Drag & drop
-│   │   │   ├── KPICards.tsx                 # Summary KPI grid
-│   │   │   ├── LayerChart.tsx               # 6 Plotly charts
-│   │   │   ├── LayerTable.tsx               # Layer data table
-│   │   │   ├── EventsView.tsx               # Events & settings panels
-│   │   │   └── DownloadSection.tsx          # Download buttons
-│   │   ├── api.ts                           # axios API client
-│   │   └── types.ts                         # TypeScript interfaces
+│   │   ├── App.tsx                       # Main layout, single + batch mode
+│   │   ├── types.ts                      # TypeScript interfaces
+│   │   ├── api.ts                        # axios API client
+│   │   └── components/
+│   │       ├── UploadArea.tsx            # Drag & drop
+│   │       ├── KPICards.tsx              # Training vector KPI grid
+│   │       ├── BatchResults.tsx          # Batch preview table
+│   │       ├── LayerChart.tsx            # Plotly charts
+│   │       ├── LayerTable.tsx            # Per-layer table
+│   │       ├── EventsView.tsx            # Events & settings panels
+│   │       └── DownloadSection.tsx       # Download buttons
 │   ├── package.json
-│   └── vite.config.ts                       # Dev proxy → :8000
+│   └── vite.config.ts                    # Dev proxy → :8001
 ├── tests/
 │   ├── conftest.py
-│   └── test_parser.py   # ~40 test cases
+│   ├── test_parser.py
+│   ├── test_new_features.py
+│   └── test_real_gcode.py
 ├── sample_data/
-│   └── mini_test.gcode  # Synthetic PrusaSlicer 2.7 snippet
-└── README.md
+│   ├── mini_test.gcode      # Synthetic PrusaSlicer snippet (unit tests)
+│   └── Nr. 1.gcode          # Real PETG tensile specimen (integration tests)
+└── start_project.bat        # Launches backend + frontend (Windows)
 ```
 
 ---
@@ -135,31 +181,31 @@ gcode-feature-extractor/
 
 ### `POST /api/extract-features`
 
-Upload a `.gcode` file.
-
 ```bash
-curl -F "file=@myprint.gcode" http://localhost:8000/api/extract-features
+curl -F "file=@myprint.gcode" http://localhost:8001/api/extract-features
 ```
 
-Response JSON:
+Key response fields:
 
 ```json
 {
   "session_id": "uuid",
   "filename": "myprint.gcode",
-  "total_lines": 123456,
-  "layer_count": 259,
-  "global_features": { ... },
-  "declared_settings": { ... },
-  "layer_features_preview": [ ... ],
-  "download_urls": {
-    "features_global_json": "/api/download/<sid>/features_global.json",
-    "features_layers_csv":  "/api/download/<sid>/features_layers.csv",
-    "feature_manifest_md":  "/api/download/<sid>/feature_manifest.md",
-    "segments_csv":         "/api/download/<sid>/segments.csv"
-  }
+  "layer_count": 39,
+  "training_vector": {
+    "feature_names": ["sp__layer_height", "sp__nozzle_temp", "..."],
+    "values":        [0.1, 230.0, "..."],
+    "n_features":    15
+  },
+  "global_features": { "..." : "..." },
+  "declared_settings": { "..." : "..." },
+  "download_urls": { "..." : "..." }
 }
 ```
+
+### `POST /api/batch-extract`
+
+Upload multiple files, returns a list of per-file `ExtractResponse` objects.
 
 ### `GET /api/download/{session_id}/{filename}`
 
@@ -167,36 +213,12 @@ Download one of the four artefacts.
 
 ---
 
-## Feature Engineering Overview
-
-### Declared Settings
-Extracted from header comments and M-code printer checks (M862.3, M862.1, M900 K…).
-
-### Global Hidden / Derived Features
-| Category | Key features |
-|----------|-------------|
-| Counts | layers, segments, retracts, wipes, G92 resets |
-| Distances | total travel/extrude path, travel-to-extrude ratio |
-| Extrusion | E/mm ratio by type, short-segment rate |
-| Retraction | mean/p95 length & speed, retracts/meter, wipe correlation |
-| Wipe | path length, time, extrusion signature |
-| Dynamics | M204 accel changes, M205 jerk, M203 max feedrate, speed-jump rate |
-| Temperature | nozzle/bed setpoint sequences, first-layer temp |
-| Directionality | infill angle histogram, anisotropy score (0=isotropic, 1=anisotropic) |
-| Seam proxy | per-layer first-extrusion start-point dispersion |
-| Linear Advance | M900 K value count, unique values, min/max/first/last |
-
-### Layer Features (CSV columns)
-`layer_id · z · height · layer_time_est_s · extrude_path_mm · travel_mm · extrude_travel_ratio · total_e_pos · total_e_neg · retract_count · mean_retract_len · wipe_blocks_count · mean_F_extrude · p95_F_extrude · mean_F_travel · anisotropy_score_infill · startpoint_dispersion`
-
----
-
 ## Compatibility
 
-- **Slicer**: PrusaSlicer 2.x (tested with 2.7.2+win64, MK3S profile)
+- **Slicer**: PrusaSlicer 2.x (tested with 2.7.x and 2.9.4, MK3S profile)
 - **Coordinate mode**: G90 absolute XY, M83 relative extrusion
 - **Units**: G21 (mm)
-- Other slicers may work but are untested. Adapt comment-marker detection in `parser.py` as needed.
+- Other slicers may work but are untested.
 
 ---
 
@@ -205,7 +227,7 @@ Extracted from header comments and M-code printer checks (M862.3, M862.1, M900 K
 | Problem | Fix |
 |---------|-----|
 | `uvicorn: command not found` | Activate venv first |
-| `CORS error` in browser | Ensure backend runs on port 8000 and frontend on 5173 |
+| `CORS error` in browser | Ensure backend runs on port **8001** and frontend on 5173 |
 | `413 Request Entity Too Large` | Default limit is 200 MB; change `MAX_FILE_SIZE_MB` in `main.py` |
 | Charts not rendering | Run `npm install` again; check browser console |
 | Session not found on download | Server restarted; re-upload the file |
